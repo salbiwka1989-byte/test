@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Гэллап Экспресс-Тест</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: Inter, UI-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; background: #f3f4f6; padding: 10px; }
+        .card { background: white; border-radius: 15px; padding: 20px; max-width: 520px; margin: auto; box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
+        .btn { width: 100%; text-align: left; padding: 14px; border: 1px solid #e6e6ef; border-radius: 10px; margin-bottom: 10px; background: #fff; cursor: pointer; font-size: 15px; }
+        .btn:hover { background: #fafafa; border-color: #6366f1; }
+        .btn:focus { outline: 3px solid rgba(99,102,241,0.15); }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .progress { height: 8px; background: #eee; border-radius: 10px; margin-bottom: 12px; overflow: hidden; }
+        .fill { height: 100%; background: #6366f1; width: 0%; transition: width 0.35s ease; }
+        .hidden { display: none; }
+        .meta { color: #6b7280; font-size: 13px; margin-bottom: 8px; }
+        .muted { color:#6b7280; }
+        .actions { display: grid; gap: 10px; margin-top: 12px; }
+    </style>
+</head>
+<body>
+    <div class="card" role="main" aria-labelledby="title">
+        <div id="start" role="region" aria-label="Старт" >
+            <h1 id="title" class="text-2xl font-bold mb-2">🌿 Гэллап-тест</h1>
+            <p class="mb-6 muted">Узнайте свои сильные стороны за 2 минуты.</p>
+            <button id="startBtn" onclick="begin()" class="w-full bg-indigo-600 text-white p-4 rounded-lg font-bold" aria-label="Начать тест">Начать</button>
+        </div>
+
+        <div id="quiz" class="hidden" role="region" aria-live="polite" aria-atomic="true">
+            <div class="meta" id="progressText">Вопрос 0/0</div>
+            <div class="progress" aria-hidden="true"><div id="bar" class="fill"></div></div>
+            <h2 id="qtext" class="text-lg font-bold mb-4"></h2>
+            <div id="options" aria-label="Варианты ответов" ></div>
+        </div>
+
+        <div id="res" class="hidden" role="region" aria-live="polite">
+            <h2 id="rtitle" class="text-xl font-bold mb-2"></h2>
+            <p id="rdesc" class="mb-6 text-gray-600"></p>
+            <div class="border-t pt-4">
+                <p class="font-bold mb-4">Что дальше?</p>
+                <div class="actions">
+                    <button onclick="go('only')" class="btn" aria-label="Только тест">1. Только тест</button>
+                    <button onclick="go('expert')" class="btn" aria-label="Тест плюс разбор">2. Тест + разбор 🔥</button>
+                    <button onclick="go('tg')" class="btn text-sm" aria-label="Читать кейсы">3. Почитать кейсы</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="final" class="hidden text-center" role="region" aria-live="polite">
+            <p id="fmsg" class="mb-4"></p>
+            <a id="flink" href="#" target="_blank" rel="noopener noreferrer" class="block w-full bg-indigo-600 text-white p-4 rounded-lg font-bold text-center mb-3">Перейти</a>
+            <div class="flex gap-2">
+                <button id="retry" onclick="resetQuiz()" class="btn" aria-label="Пройти снова">Пройти снова</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const qs = [
+            {q:"С чего начнешь день?", a:"План в блокноте", b:"Общение с людьми", c:"Забота о близких", d:"Размышления о будущем"},
+            {q:"Как решишь, чем заняться вечером?", a:"Предложу четкий план", b:"Буду активно убеждать", c:"Учту мнение каждого", d:"Взвешу все варианты"},
+            {q:"Первый шаг к новой цели?", a:"Список задач", b:"Расскажу всем", c:"Подумаю о семье", d:"Продумаю стратегию"},
+            {q:"Свободный час. Что сделаешь?", a:"Наведу порядок", b:"Позвоню другу", c:"Побуду с родными", d:"Подумаю о планах"},
+            {q:"Спор в команде. Твоя роль?", a:"Установлю правила", b:"Докажу свою правоте", c:"Помирю всех", d:"Найду общее решение"},
+            {q:"Что приятнее слышать?", a:"Ты надежный человек", b:"Ты вдохновляешь", c:"С тобой уютно", d:"Ты видишь суть"},
+            {q:"Главное в проекте?", a:"Сроки и порядок", b:"Энергия команды", c:"Доверие людей", d:"Смысл и стратегия"},
+            {q:"Встретил знакомого. Что сделаешь?", a:"Кивну и пойду дальше", b:"Заведу разговор", c:"Спрошу как дела", d:"Замечу его настрой"},
+            {q:"Новая возможность. Реакция?", a:"Составлю график", b:"Поделюсь радостью", c:"Спрошу совета семьи", d:"Оценю перспективы"},
+            {q:"У друга не получается. Помощь?", a:"Сделаю вместе с ним", b:"Подбодрю словами", c:"Просто выслушаю", d:"Дам новую идею"}
+        ];
+        const rs = {
+            a: {t:"Исполнительность", d:"Вы человек дела. Ваша сила — в порядке и результате."},
+            b: {t:"Влияние", d:"Вы лидер. Ваша сила — в умении зажигать и вести за собой."},
+            c: {t:"Отношения", d:"Вы душа команды. Ваша сила — в искренности и заботе."},
+            d: {t:"Стратег", d:"Вы мыслитель. Ваша сила — в видении будущего и анализе."}
+        };
+
+        let cur = 0;
+        let sc = {a:0, b:0, c:0, d:0};
+        let locked = false;
+
+        // Begin — show start screen -> quiz
+        function begin() {
+            resetScores();
+            document.getElementById('start').classList.add('hidden');
+            document.getElementById('final').classList.add('hidden');
+            document.getElementById('res').classList.add('hidden');
+            document.getElementById('quiz').classList.remove('hidden');
+            cur = 0;
+            show();
+        }
+
+        function resetScores() {
+            sc = {a:0, b:0, c:0, d:0};
+            locked = false;
+            document.getElementById('bar').style.width = '0%';
+        }
+
+        function show() {
+            const total = qs.length;
+            // question counter (numbered from 1)
+            document.getElementById('progressText').innerText = `Вопрос ${Math.min(cur+1, total)}/${total}`;
+            document.getElementById('qtext').innerText = qs[cur].q;
+            document.getElementById('bar').style.width = (cur / qs.length * 100) + '%';
+
+            const opt = document.getElementById('options');
+            opt.innerHTML = '';
+            locked = false;
+
+            const letters = ['a','b','c','d'];
+            letters.forEach((l, i) => {
+                const b = document.createElement('button');
+                b.className = 'btn';
+                b.innerText = qs[cur][l];
+                b.setAttribute('data-choice', l);
+                b.setAttribute('aria-label', `Вариант ${i+1}: ${qs[cur][l]}`);
+                b.onclick = () => selectOption(l);
+                b.onkeydown = (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectOption(l); }
+                };
+                opt.appendChild(b);
+            });
+
+            // focus first option for keyboard users
+            const first = opt.querySelector('button');
+            if (first) first.focus();
+        }
+
+        function selectOption(letter) {
+            if (locked) return;
+            locked = true;
+
+            // disable buttons immediately to prevent double clicks
+            document.querySelectorAll('#options button').forEach(btn => btn.disabled = true);
+
+            // increment score for letter
+            if (sc.hasOwnProperty(letter)) sc[letter]++;
+
+            // advance
+            cur++;
+            // if there are remaining questions, show next after a tiny delay for UX
+            if (cur < qs.length) {
+                // small delay to allow bar animation to show progress
+                setTimeout(() => {
+                    show();
+                }, 180);
+            } else {
+                // finished
+                // set bar to 100% then show results
+                document.getElementById('bar').style.width = '100%';
+                setTimeout(finish, 220);
+            }
+        }
+
+        function finish() {
+            document.getElementById('quiz').classList.add('hidden');
+            document.getElementById('res').classList.remove('hidden');
+
+            // Find winners (allow ties)
+            let m = -1;
+            for (let k in sc) if (sc[k] > m) m = sc[k];
+            const winners = Object.keys(sc).filter(k => sc[k] === m);
+
+            if (winners.length === 1) {
+                const win = winners[0];
+                document.getElementById('rtitle').innerText = rs[win].t;
+                document.getElementById('rdesc').innerText = rs[win].d;
+            } else {
+                // Compose combined result
+                const titles = winners.map(k => rs[k].t).join(', ');
+                const descs = winners.map(k => rs[k].d);
+                document.getElementById('rtitle').innerText = `Сильные стороны: ${titles}`;
+                // join descriptions with separators
+                document.getElementById('rdesc').innerText = descs.join(' ');
+            }
+        }
+
+        function go(t) {
+            document.getElementById('res').classList.add('hidden');
+            document.getElementById('final').classList.remove('hidden');
+            const ig = "https://www.instagram.com/marina_merjoeva";
+            const tg = "https://t.me/your_channel";
+            if (t === 'only') {
+                document.getElementById('fmsg').innerText = "Напишите менеджеру: «ХОЧУ ТЕСТ»";
+                const a = document.getElementById('flink');
+                a.href = ig; a.rel = "noopener noreferrer";
+            } else if (t === 'expert') {
+                document.getElementById('fmsg').innerText = "Напишите менеджеру: «РАЗБОР»";
+                const a = document.getElementById('flink');
+                a.href = ig; a.rel = "noopener noreferrer";
+            } else {
+                document.getElementById('fmsg').innerText = "Читайте кейсы в Telegram";
+                const a = document.getElementById('flink');
+                a.href = tg; a.rel = "noopener noreferrer";
+            }
+        }
+
+        function resetQuiz() {
+            // show start screen to allow retake
+            document.getElementById('final').classList.add('hidden');
+            document.getElementById('res').classList.add('hidden');
+            document.getElementById('quiz').classList.add('hidden');
+            document.getElementById('start').classList.remove('hidden');
+            resetScores();
+        }
+
+        // keyboard: allow 1-4 keys to choose answers while quiz visible
+        window.addEventListener('keydown', (e) => {
+            const quizVisible = !document.getElementById('quiz').classList.contains('hidden');
+            if (!quizVisible) return;
+            if (['1','2','3','4'].includes(e.key)) {
+                const idx = parseInt(e.key, 10) - 1;
+                const btns = Array.from(document.querySelectorAll('#options button'));
+                if (btns[idx] && !btns[idx].disabled) {
+                    btns[idx].click();
+                    e.preventDefault();
+                }
+            }
+        });
+
+        // Safety: prevent accidental double submission on page unload (no network here, but good practice)
+        window.addEventListener('beforeunload', (e) => {
+            // no-op, placeholder for potential analytics / confirmation
+        });
+
+        // Expose some functions for testing in console
+        window._gallup = { begin, resetQuiz, getScores: () => sc, getCurrent: () => cur };
+    </script>
+</body>
+</html>
