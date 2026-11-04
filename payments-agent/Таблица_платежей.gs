@@ -246,21 +246,24 @@ function fixFormulas() {
 
 /* ---------- Напоминания в Telegram ---------- */
 /*
- * Общая сводка уходит тем, у кого на листе «Менеджеры» в третьем столбце стоит «да».
+ * Утром (9:00): каждой менеджер свой список, владелице «План на день».
+ * Вечером (20:00): владелице «Факт за день»: что собрали и что из плана не оплачено.
+ * Владелица = строка на листе «Менеджеры» с «да» в третьем столбце.
+ *
+ * Когда МОП ставит статус «Оплачено», в «Дата оплаты» сама подставляется сегодняшняя дата.
+ * По этой дате вечерний отчёт понимает, что деньги пришли именно сегодня.
  *
  * Настройка:
- * 1. Шестерёнка «Настройки проекта» → «Свойства скрипта» → добавить свойство
- *    TELEGRAM_TOKEN со значением токена от @BotFather.
- * 2. Каждая менеджер нажимает «Старт» в боте и пишет ему любое сообщение.
- * 3. Запустить showBotChats: в журнале появятся имена и chat_id.
- *    Вписать chat_id на лист «Менеджеры». Себе тоже: добавить строку со своим именем,
- *    chat_id и «да» в третьем столбце.
- * 4. Запустить sendReminders, проверить, что сообщения пришли.
- * 5. Запустить setupDailyTrigger: напоминания будут уходить каждый день в 9:00.
+ * 1. Шестерёнка «Настройки проекта» → «Свойства скрипта» → свойство TELEGRAM_TOKEN.
+ * 2. Нажать «Старт» в боте и написать ему любое слово.
+ * 3. Запустить showBotChats: в журнале будут имена и chat_id. Вписать их на лист «Менеджеры».
+ * 4. Проверить: sendReminders (утро) и sendEveningReport (вечер).
+ * 5. Запустить setupDailyTrigger один раз: включает утро, вечер и автодату оплаты.
  */
 
-const REMIND_DAYS_BEFORE = 2;   // за сколько дней предупреждать
-const SUMMARY_WEEKDAY = null;   // null = общая сводка каждый день; 1 = только по понедельникам (0 = воскресенье)
+const REMIND_DAYS_BEFORE = 2;   // за сколько дней предупреждать менеджера
+const MORNING_HOUR = 9;
+const EVENING_HOUR = 20;
 
 function tg_(method, payload) {
   const token = PropertiesService.getScriptProperties().getProperty('TELEGRAM_TOKEN');
@@ -302,19 +305,38 @@ function money_(n) {
   return n === '' || n === null ? 'сумма не указана' : Utilities.formatString('%s ₽', Math.round(n).toLocaleString('ru-RU'));
 }
 
-function readPayments_() {
+function tz_() { return Session.getScriptTimeZone(); }
+function dayKey_(d) { return Utilities.formatDate(d, tz_(), 'yyyy-MM-dd'); }
+function sum_(arr) { return arr.reduce((a, p) => a + (Number(p.amount) || 0), 0); }
+function total_(arr) { return arr.length + ' на ' + money_(sum_(arr)); }
+
+/** Все платежи с днями до оплаты (отрицательные = просрочка). */
+function readAll_() {
   const ss = paymentsSpreadsheet_();
   const v = ss.getSheetByName('Платежи').getDataRange().getValues();
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const out = [];
+  const all = [];
   for (let i = 1; i < v.length; i++) {
-    const [client, tgName, mop, num, date, amount, status] = v[i];
-    if (!client || status === 'Оплачено' || status === 'Отказ') continue;
-    if (!(date instanceof Date)) { out.push({ client, tgName, mop, num, amount, days: null }); continue; }
-    const d = new Date(date); d.setHours(0, 0, 0, 0);
-    out.push({ client, tgName, mop, num, amount, date: d, days: Math.round((d - today) / 86400000) });
+    const [client, tgName, mop, num, date, amount, status, paidDate] = v[i];
+    if (!client) continue;
+    const p = { client, tgName, mop, num, amount, status, paidDate: paidDate instanceof Date ? paidDate : null, days: null };
+    if (date instanceof Date) {
+      p.date = new Date(date); p.date.setHours(0, 0, 0, 0);
+      p.days = Math.round((p.date - today) / 86400000);
+    }
+    all.push(p);
   }
-  return { ss, list: out };
+  const mgr = ss.getSheetByName('Менеджеры').getDataRange().getValues().slice(1)
+    .filter(r => r[0] && r[1])
+    .map(r => ({ name: String(r[0]).trim(), chat: String(r[1]).trim(), owner: String(r[2]).trim().toLowerCase() === 'да' }));
+  return { ss, all, mgr };
+}
+
+function isOpen_(p) { return p.status !== 'Оплачено' && p.status !== 'Отказ'; }
+function groupBy_(arr) {
+  const g = {};
+  arr.forEach(p => { (g[p.mop] = g[p.mop] || []).push(p); });
+  return g;
 }
 
 function line_(p) {
@@ -323,14 +345,11 @@ function line_(p) {
   return '• ' + who + ', платёж №' + p.num + ', ' + money_(p.amount) + ' (' + when + ')';
 }
 
-/** Ежедневная рассылка: каждой менеджер свой список, владельцам сводка по понедельникам. */
+/** Утро: менеджерам их списки, владелице план на день. */
 function sendReminders() {
-  const { ss, list } = readPayments_();
-  const mgr = ss.getSheetByName('Менеджеры').getDataRange().getValues().slice(1)
-    .filter(r => r[0] && r[1]).map(r => ({ name: String(r[0]).trim(), chat: String(r[1]).trim(), summary: String(r[2]).trim().toLowerCase() === 'да' }));
-
-  const byMop = {};
-  list.forEach(p => { (byMop[p.mop] = byMop[p.mop] || []).push(p); });
+  const { ss, all, mgr } = readAll_();
+  const open = all.filter(isOpen_);
+  const byMop = groupBy_(open);
 
   mgr.forEach(m => {
     const mine = byMop[m.name];
@@ -343,35 +362,81 @@ function sendReminders() {
     const t = ['Доброе утро! Платежи на сегодня:'];
     if (today.length) t.push('', 'Оплата сегодня:', ...today.map(line_));
     if (soon.length) t.push('', 'Скоро, предупредить заранее:', ...soon.map(line_));
-    if (overdue.length) {
-      const sum = overdue.reduce((a, p) => a + (Number(p.amount) || 0), 0);
-      t.push('', 'Просрочено (' + overdue.length + ', ' + money_(sum) + '):',
-        ...overdue.map(p => line_(p) + ', ' + (-p.days) + ' дн.'));
-    }
+    if (overdue.length) t.push('', 'Просрочено (' + total_(overdue) + '):', ...overdue.map(p => line_(p) + ', ' + (-p.days) + ' дн.'));
     t.push('', 'После оплаты поставьте «Оплачено» в таблице: ' + ss.getUrl());
     sendText_(m.chat, t.join('\n'));
   });
 
-  const now = new Date();
-  if (SUMMARY_WEEKDAY !== null && now.getDay() !== SUMMARY_WEEKDAY) return;
-  const s = ['Сводка по рассрочкам на ' + Utilities.formatDate(now, Session.getScriptTimeZone(), 'dd.MM.yyyy')];
+  const owners = mgr.filter(m => m.owner);
+  if (!owners.length) return;
+  const todayAll = open.filter(p => p.days === 0);
+  const overdueAll = open.filter(p => p.days !== null && p.days < 0);
+  const s = ['План на ' + Utilities.formatDate(new Date(), tz_(), 'dd.MM.yyyy'), '',
+    'Сегодня ждём: ' + total_(todayAll),
+    'Всего в просрочке: ' + total_(overdueAll)];
   Object.keys(byMop).sort().forEach(name => {
-    const od = byMop[name].filter(p => p.days !== null && p.days < 0);
     const td = byMop[name].filter(p => p.days === 0);
-    const wk = byMop[name].filter(p => p.days !== null && p.days >= 0 && p.days <= 7);
-    const sum = arr => money_(arr.reduce((a, p) => a + (Number(p.amount) || 0), 0));
-    s.push('', name + ':', '  сегодня ждём ' + td.length + ' на ' + sum(td),
-      '  за 7 дней ждём ' + wk.length + ' на ' + sum(wk),
-      '  просрочено ' + od.length + ' на ' + sum(od));
-    const long = od.filter(p => p.days <= -7);
-    if (long.length) s.push('  дольше недели:', ...long.map(p => '  ' + line_(p) + ', ' + (-p.days) + ' дн.'));
+    const od = byMop[name].filter(p => p.days !== null && p.days < 0);
+    const wk = byMop[name].filter(p => p.days !== null && p.days > 0 && p.days <= 7);
+    s.push('', name + ':', 'сегодня ' + total_(td));
+    td.forEach(p => s.push(line_(p)));
+    s.push('в ближайшие 7 дней ' + total_(wk), 'просрочено ' + total_(od));
+    const long = od.filter(p => p.days <= -7).sort((a, b) => a.days - b.days);
+    if (long.length) s.push('дольше недели:', ...long.map(p => line_(p) + ', ' + (-p.days) + ' дн.'));
   });
-  mgr.filter(m => m.summary).forEach(m => sendText_(m.chat, s.join('\n')));
+  owners.forEach(m => sendText_(m.chat, s.join('\n')));
 }
 
-/** Создаёт ежедневный запуск sendReminders в 9:00. Запускать один раз. */
+/** Вечер: владелице факт за день. */
+function sendEveningReport() {
+  const { all, mgr } = readAll_();
+  const owners = mgr.filter(m => m.owner);
+  if (!owners.length) return;
+  const key = dayKey_(new Date());
+
+  const collected = all.filter(p => p.status === 'Оплачено' && p.paidDate && dayKey_(p.paidDate) === key);
+  const plan = all.filter(p => p.days === 0 && p.status !== 'Отказ');
+  const planPaid = plan.filter(p => p.status === 'Оплачено');
+  const planMissed = plan.filter(isOpen_);
+  const overdueAll = all.filter(p => isOpen_(p) && p.days !== null && p.days <= 0);
+
+  const s = ['Факт за ' + Utilities.formatDate(new Date(), tz_(), 'dd.MM.yyyy'), '',
+    'Собрано сегодня: ' + total_(collected),
+    'План на сегодня: ' + total_(plan) + ', оплачено ' + total_(planPaid),
+    'Не оплачено к вечеру, включая старые долги: ' + total_(overdueAll)];
+
+  const mops = Array.from(new Set(collected.concat(planMissed).map(p => p.mop))).sort();
+  mops.forEach(name => {
+    const c = collected.filter(p => p.mop === name);
+    const miss = planMissed.filter(p => p.mop === name);
+    s.push('', name + ':');
+    if (c.length) s.push('собрано ' + total_(c), ...c.map(line_));
+    if (miss.length) s.push('из плана не оплатили:', ...miss.map(line_));
+  });
+  if (!collected.length && !plan.length) s.push('', 'Сегодня оплат не было и не ожидалось.');
+  owners.forEach(m => sendText_(m.chat, s.join('\n')));
+}
+
+/** Когда в «Статус» ставят «Оплачено», подставляет сегодняшнюю дату оплаты, если её нет. */
+function onPaymentsEdit(e) {
+  const r = e.range, sh = r.getSheet();
+  if (sh.getName() !== 'Платежи') return;
+  const firstCol = r.getColumn(), lastCol = firstCol + r.getNumColumns() - 1;
+  if (firstCol > 7 || lastCol < 7) return;
+  const rows = sh.getRange(r.getRow(), 7, r.getNumRows(), 2).getValues();
+  let changed = false;
+  rows.forEach(row => {
+    if (row[0] === 'Оплачено' && !row[1]) { row[1] = new Date(); changed = true; }
+  });
+  if (changed) sh.getRange(r.getRow(), 8, r.getNumRows(), 1).setValues(rows.map(x => [x[1]]));
+}
+
+/** Включает утреннюю и вечернюю рассылку и автодату оплаты. Запускать один раз. */
 function setupDailyTrigger() {
-  ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'sendReminders').forEach(t => ScriptApp.deleteTrigger(t));
-  ScriptApp.newTrigger('sendReminders').timeBased().everyDays(1).atHour(9).create();
-  Logger.log('Готово: напоминания будут уходить каждый день около 9:00 (' + Session.getScriptTimeZone() + ').');
+  const mine = ['sendReminders', 'sendEveningReport', 'onPaymentsEdit'];
+  ScriptApp.getProjectTriggers().filter(t => mine.indexOf(t.getHandlerFunction()) >= 0).forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('sendReminders').timeBased().everyDays(1).atHour(MORNING_HOUR).create();
+  ScriptApp.newTrigger('sendEveningReport').timeBased().everyDays(1).atHour(EVENING_HOUR).create();
+  ScriptApp.newTrigger('onPaymentsEdit').forSpreadsheet(paymentsSpreadsheet_().getId()).onEdit().create();
+  Logger.log('Готово: план около ' + MORNING_HOUR + ':00, факт около ' + EVENING_HOUR + ':00 (' + tz_() + ').');
 }
