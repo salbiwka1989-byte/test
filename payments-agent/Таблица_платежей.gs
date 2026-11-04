@@ -246,6 +246,8 @@ function fixFormulas() {
 
 /* ---------- Напоминания в Telegram ---------- */
 /*
+ * Общая сводка уходит тем, у кого на листе «Менеджеры» в третьем столбце стоит «да».
+ *
  * Настройка:
  * 1. Шестерёнка «Настройки проекта» → «Свойства скрипта» → добавить свойство
  *    TELEGRAM_TOKEN со значением токена от @BotFather.
@@ -258,7 +260,7 @@ function fixFormulas() {
  */
 
 const REMIND_DAYS_BEFORE = 2;   // за сколько дней предупреждать
-const SUMMARY_WEEKDAY = 1;      // общая сводка по понедельникам (0 = воскресенье)
+const SUMMARY_WEEKDAY = null;   // null = общая сводка каждый день; 1 = только по понедельникам (0 = воскресенье)
 
 function tg_(method, payload) {
   const token = PropertiesService.getScriptProperties().getProperty('TELEGRAM_TOKEN');
@@ -351,14 +353,18 @@ function sendReminders() {
   });
 
   const now = new Date();
-  if (now.getDay() !== SUMMARY_WEEKDAY) return;
-  const s = ['Сводка по рассрочкам на ' + Utilities.formatDate(now, Session.getScriptTimeZone(), 'dd.MM.yyyy'), ''];
+  if (SUMMARY_WEEKDAY !== null && now.getDay() !== SUMMARY_WEEKDAY) return;
+  const s = ['Сводка по рассрочкам на ' + Utilities.formatDate(now, Session.getScriptTimeZone(), 'dd.MM.yyyy')];
   Object.keys(byMop).sort().forEach(name => {
     const od = byMop[name].filter(p => p.days !== null && p.days < 0);
+    const td = byMop[name].filter(p => p.days === 0);
     const wk = byMop[name].filter(p => p.days !== null && p.days >= 0 && p.days <= 7);
     const sum = arr => money_(arr.reduce((a, p) => a + (Number(p.amount) || 0), 0));
-    s.push(name + ': просрочено ' + od.length + ' на ' + sum(od) + '; на этой неделе ждём ' + wk.length + ' на ' + sum(wk));
-    od.filter(p => p.days <= -7).forEach(p => s.push('  ' + line_(p) + ', ' + (-p.days) + ' дн.'));
+    s.push('', name + ':', '  сегодня ждём ' + td.length + ' на ' + sum(td),
+      '  за 7 дней ждём ' + wk.length + ' на ' + sum(wk),
+      '  просрочено ' + od.length + ' на ' + sum(od));
+    const long = od.filter(p => p.days <= -7);
+    if (long.length) s.push('  дольше недели:', ...long.map(p => '  ' + line_(p) + ', ' + (-p.days) + ' дн.'));
   });
   mgr.filter(m => m.summary).forEach(m => sendText_(m.chat, s.join('\n')));
 }
