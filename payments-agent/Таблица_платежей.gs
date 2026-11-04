@@ -290,6 +290,31 @@ function showBotChats() {
   Logger.log(lines.length ? lines.join('\n') : 'Боту пока никто не писал. Попросите менеджеров нажать «Старт» и написать любое слово.');
 }
 
+/**
+ * Добавляет на лист «Менеджеры» того, кто последним написал боту, как получателя общей сводки,
+ * и сразу отправляет ему проверочное сообщение. Перед запуском: написать боту любое слово.
+ */
+function addMe() {
+  const token = PropertiesService.getScriptProperties().getProperty('TELEGRAM_TOKEN');
+  if (!token) { Logger.log('Нет токена: добавьте TELEGRAM_TOKEN в «Настройки проекта» → «Свойства скрипта».'); return; }
+  const bot = tg_('getMe', {});
+  Logger.log('Бот найден: @' + bot.username);
+  const msgs = tg_('getUpdates', {}).map(u => u.message).filter(m => m && m.chat && m.chat.type === 'private');
+  if (!msgs.length) {
+    Logger.log('Бот @' + bot.username + ' пока не получил ни одного сообщения. Откройте именно его, нажмите «Старт», напишите любое слово и запустите addMe ещё раз.');
+    return;
+  }
+  const chat = msgs[msgs.length - 1].chat;
+  const name = chat.first_name || 'Владелица';
+  const sh = paymentsSpreadsheet_().getSheetByName('Менеджеры');
+  const rows = sh.getDataRange().getValues();
+  let row = rows.findIndex((r, i) => i > 0 && String(r[1]).trim() === String(chat.id));
+  if (row < 0) row = rows.length;
+  sh.getRange(row + 1, 1, 1, 3).setValues([[name, String(chat.id), 'да']]);
+  sendText_(chat.id, 'Готово. Сюда будут приходить план на день утром и факт вечером.');
+  Logger.log('Добавлено: ' + name + ', chat_id ' + chat.id + ', строка ' + (row + 1) + ' листа «Менеджеры». Проверочное сообщение отправлено.');
+}
+
 function sendText_(chatId, text) {
   // Telegram принимает до 4096 символов, режем по строкам
   const parts = [];
