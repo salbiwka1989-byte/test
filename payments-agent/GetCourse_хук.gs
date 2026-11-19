@@ -6,7 +6,8 @@
  *  1. считает, сколько пришло сейчас (оплачено всего минус то, что уже записано по этому заказу);
  *  2. записывает поступление на лист «Поступления GK»;
  *  3. ставит «Оплачено» ближайшему неоплаченному платежу клиентки на листе «Платежи»;
- *  4. пишет об оплате её менеджеру в Telegram, а если клиентку найти не удалось, владелицам.
+ *  4. пишет об оплате её менеджеру в Telegram.
+ * Заказы, которых нет в графике (столбец «Заказ GK (номер)» на листе «Платежи»), пропускаются молча.
  * Повторный вызов с той же суммой ничего не задвоит: прирост будет 0.
  *
  * Это отдельный проект Apps Script, он не трогает остальные скрипты.
@@ -96,36 +97,31 @@ function processPayment_(p) {
   const paidTotal = num_(p.paid);
   if (!orderId && !orderNum) return 'skip: нет номера заказа';
 
-  // Сколько уже записано по этому заказу
+  // Работаем только с заказами из графика рассрочек: номер заказа должен стоять в «Платежах»
+  const payVals = paySh.getDataRange().getValues();
+  const PC = cols_(payVals[0], ['Клиентка', 'МОП', '№ платежа', 'Дата платежа', 'Сумма, ₽', 'Статус', 'Дата оплаты',
+    'Заказ GK (номер)', 'Зачтено из GK, ₽']);
+  if (PC['Заказ GK (номер)'] < 0) return 'skip: в «Платежах» нет столбца «Заказ GK (номер)»';
+  const planRows = [];
+  for (let i = 1; i < payVals.length; i++) {
+    const v = String(payVals[i][PC['Заказ GK (номер)']]).trim();
+    if (v && (v === orderNum || v === orderId)) planRows.push({ i, r: payVals[i] });
+  }
+  if (!planRows.length) return 'skip: заказ не из графика рассрочек';
+  const client = String(planRows[0].r[PC['Клиентка']]).trim();
+
+  // Сколько уже учтено по этому заказу
   const sameOrder = r => {
     const id = String(r[IC['ID заказа']]).trim(), nm = String(r[IC['Номер заказа']]).trim();
     return (orderId && (id === orderId || nm === orderId)) || (orderNum && (id === orderNum || nm === orderNum));
   };
   const prev = inVals.slice(1).filter(sameOrder);
-  const already = prev.reduce((a, r) => a + num_(r[IC['Сумма платежа']]), 0);
+  const sumPrev = prev.reduce((a, r) => a + num_(r[IC['Сумма платежа']]), 0);
+  const lastTotal = IC['Всего оплачено по заказу'] < 0 ? 0 :
+    prev.reduce((a, r) => Math.max(a, num_(r[IC['Всего оплачено по заказу']])), 0);
+  const already = Math.max(sumPrev, lastTotal);
   const amount = Math.round((paidTotal - already) * 100) / 100;
-  if (amount <= 0) return 'skip: новых денег нет (оплачено ' + paidTotal + ', уже записано ' + already + ')';
-
-  // Кто клиентка
-  const payVals = paySh.getDataRange().getValues();
-  const PC = cols_(payVals[0], ['Клиентка', 'МОП', '№ платежа', 'Дата платежа', 'Сумма, ₽', 'Статус', 'Дата оплаты',
-    'Заказ GK (номер)', 'Зачтено из GK, ₽']);
-  let client = '';
-  if (PC['Заказ GK (номер)'] >= 0) {
-    const hit = payVals.slice(1).find(r => {
-      const v = String(r[PC['Заказ GK (номер)']]).trim();
-      return v && (v === orderNum || v === orderId);
-    });
-    if (hit) client = String(hit[PC['Клиентка']]).trim();
-  }
-  if (!client) {
-    const named = prev.find(r => String(r[IC['Клиентка']]).trim());
-    if (named) client = String(named[IC['Клиентка']]).trim();
-  }
-  if (!client && email && IC['Email'] >= 0) {
-    const byMail = inVals.slice(1).find(r => norm_(r[IC['Email']]) === email && String(r[IC['Клиентка']]).trim());
-    if (byMail) client = String(byMail[IC['Клиентка']]).trim();
-  }
+  if (amount <= 0) return 'skip: новых денег нет (оплачено ' + paidTotal + ', уже учтено ' + already + ')';
 
   // Записываем поступление
   const now = new Date();
@@ -135,7 +131,7 @@ function processPayment_(p) {
   put('ID заказа', orderId || orderNum);
   put('Номер заказа', orderNum);
   put('Email', p.email || '');
-  put('Клиентка', client || p.name || '');
+  put('Клиентка', client);
   put('Сумма платежа', amount);
   put('Всего оплачено по заказу', paidTotal);
   put('Стоимость заказа', p.cost ? num_(p.cost) : '');
@@ -143,22 +139,11 @@ function processPayment_(p) {
   put('Время записи', Utilities.formatDate(now, HOOK_TZ, 'dd.MM.yyyy H:mm:ss'));
   inSh.appendRow(row);
 
-  if (!client) {
-    notifyOwners_('Пришла оплата из GetCourse, но клиентку в таблице найти не удалось.\n' +
-      'Заказ ' + orderNum + ', ' + (p.name || 'без имени') + ', ' + (p.email || 'без почты') + ', ' + money2_(amount) +
-      '.\nОплата записана на лист «Поступления GK», статус в «Платежах» нужно поставить вручную.');
-    return 'ok: записано, клиентка не найдена';
-  }
-
   // Отмечаем платежи: по порядку дат, пока хватает суммы
-  const open = [];
-  for (let i = 1; i < payVals.length; i++) {
-    const r = payVals[i];
-    if (norm_(r[PC['Клиентка']]) !== norm_(client)) continue;
-    const st = String(r[PC['Статус']]);
-    if (st === 'Оплачено' || st === 'Отказ') continue;
-    open.push({ i, r, date: r[PC['Дата платежа']] instanceof Date ? r[PC['Дата платежа']].getTime() : Infinity });
-  }
+  const open = planRows.filter(o => {
+    const st = String(o.r[PC['Статус']]);
+    return st !== 'Оплачено' && st !== 'Отказ';
+  }).map(o => Object.assign(o, { date: o.r[PC['Дата платежа']] instanceof Date ? o.r[PC['Дата платежа']].getTime() : Infinity }));
   open.sort((a, b) => a.date - b.date);
   let rest = amount;
   const marked = [];
@@ -175,7 +160,7 @@ function processPayment_(p) {
     if (rest <= 1) break;
   }
 
-  const mop = open.length ? String(open[0].r[PC['МОП']]).trim() : '';
+  const mop = String(planRows[0].r[PC['МОП']]).trim();
   let msg = client + ' оплатила ' + money2_(amount) + ' (заказ ' + orderNum + ').';
   if (marked.length) {
     msg += '\nОтмечено в таблице: ' + marked.map(o => 'платёж №' + o.r[PC['№ платежа']]).join(', ') + '.';
@@ -218,4 +203,45 @@ function testHook() {
   const secret = PropertiesService.getScriptProperties().getProperty('GK_SECRET');
   const res = handleHook_({ parameter: { key: secret, order_id: '22640', order_number: '22640', email: '', name: 'Тест', paid: '0' } });
   Logger.log(res.getContent());
+}
+
+/**
+ * Один раз: убирает следы первого запуска 19.11.2026, когда GetCourse прислал сразу 93 заказа.
+ * 1. Удаляет из «Поступлений GK» строки «GetCourse хук» по заказам, которых нет в графике.
+ * 2. Возвращает статус «Ожидается» платежам, которые хук отметил по чужому заказу:
+ *    Алена Гасанбекова №2–4 и Фатима (@Fatima_Bokova) №1.
+ */
+function cleanupFirstRun() {
+  const ss = SpreadsheetApp.openById(HOOK_PAYMENTS_ID);
+  const paySh = ss.getSheetByName('Платежи');
+  const pv = paySh.getDataRange().getValues();
+  const PC = cols_(pv[0], ['Клиентка', 'Telegram', '№ платежа', 'Статус', 'Дата оплаты', 'Заказ GK (номер)', 'Зачтено из GK, ₽']);
+  const plan = new Set(pv.slice(1).map(r => String(r[PC['Заказ GK (номер)']]).trim()).filter(String));
+
+  const inSh = ss.getSheetByName('Поступления GK');
+  const iv = inSh.getDataRange().getValues();
+  const IC = cols_(iv[0], ['ID заказа', 'Номер заказа', 'Источник']);
+  let removed = 0;
+  for (let i = iv.length - 1; i >= 1; i--) {
+    if (String(iv[i][IC['Источник']]) !== 'GetCourse хук') continue;
+    const id = String(iv[i][IC['ID заказа']]).trim(), nm = String(iv[i][IC['Номер заказа']]).trim();
+    if (!plan.has(id) && !plan.has(nm)) { inSh.deleteRow(i + 1); removed++; }
+  }
+
+  const wrong = [
+    r => norm_(r[PC['Клиентка']]) === 'алена гасанбекова' && [2, 3, 4].indexOf(Number(r[PC['№ платежа']])) >= 0,
+    r => String(r[PC['Telegram']]).trim() === '@Fatima_Bokova' && Number(r[PC['№ платежа']]) === 1,
+  ];
+  const reverted = [];
+  for (let i = 1; i < pv.length; i++) {
+    const r = pv[i];
+    const d = r[PC['Дата оплаты']];
+    const today = d instanceof Date && Utilities.formatDate(d, HOOK_TZ, 'dd.MM.yyyy') === '19.11.2026';
+    if (!today || r[PC['Статус']] !== 'Оплачено' || !wrong.some(f => f(r))) continue;
+    paySh.getRange(i + 1, PC['Статус'] + 1).setValue('Ожидается');
+    paySh.getRange(i + 1, PC['Дата оплаты'] + 1).clearContent();
+    paySh.getRange(i + 1, PC['Зачтено из GK, ₽'] + 1).clearContent();
+    reverted.push(r[PC['Клиентка']] + ' №' + r[PC['№ платежа']]);
+  }
+  Logger.log('Удалено строк из «Поступлений GK»: ' + removed + '. Возвращено в «Ожидается»: ' + (reverted.join(', ') || 'ничего'));
 }
